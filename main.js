@@ -7,7 +7,7 @@ const readline = require('readline');
 const stream = require('stream');
 const yaml = require('yaml');
 const fs = require('fs');
-const simpleLogger = require('simple-node-logger');
+const simpleLogger = require('simple-node-logger-se');
 
 const parser = new argparse.ArgumentParser({
     description: 'Virtual Onvif Server'
@@ -90,7 +90,7 @@ if (args) {
         for (let onvifConfig of config.onvif) {
             let server = onvifServer.createServer(onvifConfig, logger);
             if (server.getHostname()) {
-                logger.info(`Starting virtual onvif server for ${onvifConfig.name} on ${onvifConfig.mac} ${server.getHostname()}:${onvifConfig.ports.server} ...`);
+                logger.info(`Starting virtual onvif server for ${onvifConfig.name} on ${server.getHostname()}:${onvifConfig.ports.server} ...`);
                 server.startServer();
                 server.startDiscovery();
                 if (args.debug)

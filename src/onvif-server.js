@@ -347,6 +347,7 @@ class OnvifServer {
 
     startServer() {
         this.server = http.createServer(this.listen);
+
         this.server.listen(this.config.ports.server, this.config.hostname);
 
         this.deviceService = soap.listen(this.server, {
@@ -379,6 +380,8 @@ class OnvifServer {
         this.discoverySocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
         
         this.discoverySocket.on('message', (message, remote) => {
+            this.logger.debug(`Discovery Server: ${this.config.name} - Discovery request from ${remote.address}:${remote.port}`);
+
             xml2js.parseString(message.toString(), { tagNameProcessors: [xml2js['processors'].stripPrefix] }, (err, result) => {
                 let probeUuid = result['Envelope']['Header'][0]['MessageID'][0];
                 let probeType = '';
@@ -443,8 +446,8 @@ class OnvifServer {
     }
 };
 
-function createServer(config) {
-    return new OnvifServer(config);
+function createServer(config, logger) {
+    return new OnvifServer(config, logger);
 }
 
 exports.createServer = createServer;

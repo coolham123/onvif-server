@@ -41,6 +41,7 @@ To properly work with Unifi Protect each virtual Onvif device needs to have its 
 The easiest way to achieve this is by creating virtual network interfaces with the MacVLAN[^1] network driver:
 ```bash
 ip link add [NAME] link [INTERFACE] address [MAC_ADDRESS] type macvlan mode bridge
+ip link set [NAME] up
 ```
 
 > [!TIP]
@@ -53,15 +54,19 @@ Replace `[NAME]` with a name of your choosing (e.g. `onvif-proxy-1`) and `[MAC_A
 ```bash
 # Setup the first virtual network with name "onvif-proxy-1" and MAC address "a2:a2:a2:a2:a2:a1":
 sudo ip link add onvif-proxy-1 link eth0 address a2:a2:a2:a2:a2:a1 type macvlan mode bridge
+sudo ip link set onvif-proxy-1 up
 
 # Setup the first virtual network with name "onvif-proxy-2" and MAC address "a2:a2:a2:a2:a2:a2":
 sudo ip link add onvif-proxy-2 link eth0 address a2:a2:a2:a2:a2:a2 type macvlan mode bridge
+sudo ip link set onvif-proxy-2 up
 
 # Setup the first virtual network with name "onvif-proxy-3" and MAC address "a2:a2:a2:a2:a2:a3":
 sudo ip link add onvif-proxy-3 link eth0 address a2:a2:a2:a2:a2:a3 type macvlan mode bridge
+sudo ip link set onvif-proxy-3 up
 
 # Setup the first virtual network with name "onvif-proxy-4" and MAC address "a2:a2:a2:a2:a2:a4":
 sudo ip link add onvif-proxy-4 link eth0 address a2:a2:a2:a2:a2:a4 type macvlan mode bridge
+sudo ip link set onvif-proxy-4 up
 ```
 
 > [!IMPORTANT]
