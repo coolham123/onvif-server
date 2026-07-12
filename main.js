@@ -126,10 +126,49 @@ if (args) {
             }
         }
         
+        // In debug mode, sniff the text protocol (RTSP/HTTP) flowing through the
+        // proxies: connections, methods, status lines and Transport headers.
+        // Logging stops per-connection once binary (interleaved RTP) starts.
+        let proxyConnectionNo = 0;
+        const makeSniffer = (label, direction) => (context, data) => {
+            if (!context.sniffId) {
+                context.sniffId = ++proxyConnectionNo;
+                context.sniffLines = 0;
+                logger.debug(`${label} #${context.sniffId}: connection from ${context.proxySocket.remoteAddress}:${context.proxySocket.remotePort}`);
+            }
+            if (context.sniffDone)
+                return data;
+            let text = data.toString('latin1');
+            if (text.charCodeAt(0) === 0x24) { // '$' = interleaved RTP data
+                context.sniffDone = true;
+                return data;
+            }
+            for (let line of text.split('\r\n')) {
+                if (/^(OPTIONS|DESCRIBE|SETUP|PLAY|PAUSE|TEARDOWN|GET_PARAMETER|SET_PARAMETER|GET|POST) /.test(line) ||
+                    /^(RTSP\/1\.0|HTTP\/1\.[01]) /.test(line) ||
+                    /^(Transport|Session|Range|Content-Type):/i.test(line)) {
+                    logger.debug(`${label} #${context.sniffId} ${direction} ${line}`);
+                    if (++context.sniffLines > 200) {
+                        context.sniffDone = true;
+                        break;
+                    }
+                }
+            }
+            return data;
+        };
+
         for (let destinationAddress in proxies) {
             for (let sourcePort in proxies[destinationAddress]) {
                 logger.info(`Starting tcp proxy from port ${sourcePort} to ${destinationAddress}:${proxies[destinationAddress][sourcePort]} ...`);
-                proxyServers.push(tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]));
+                let proxyOptions;
+                if (args.debug) {
+                    const label = `Proxy:${sourcePort}`;
+                    proxyOptions = {
+                        upstream: makeSniffer(label, '->'),
+                        downstream: makeSniffer(label, '<-')
+                    };
+                }
+                proxyServers.push(tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort], proxyOptions));
                 logger.info('  Started!');
                 logger.info('');
             }
