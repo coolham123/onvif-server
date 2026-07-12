@@ -37,6 +37,41 @@ class OnvifServer {
         this.realPtzProfileToken = null;
         this.ptzTarget = null;
 
+        this.audioConfig = null;
+        if (this.config.audio) {
+            let audio = typeof this.config.audio === 'object' ? this.config.audio : {};
+            this.audioConfig = {
+                encoding: audio.encoding || 'AAC',
+                bitrate: audio.bitrate || 64,
+                samplerate: audio.samplerate || 16
+            };
+            this.audioSource = {
+                attributes: {
+                    token: 'audio_src_token'
+                },
+                Channels: 1
+            };
+            this.audioSourceConfiguration = {
+                attributes: {
+                    token: 'audio_src_config_token'
+                },
+                Name: 'AudioSource',
+                UseCount: 2,
+                SourceToken: 'audio_src_token'
+            };
+            this.audioEncoderConfiguration = {
+                attributes: {
+                    token: 'audio_encoder_config_token'
+                },
+                Name: 'CardinalAudioConfiguration',
+                UseCount: 2,
+                Encoding: this.audioConfig.encoding,
+                Bitrate: this.audioConfig.bitrate,
+                SampleRate: this.audioConfig.samplerate,
+                SessionTimeout: 'PT1000S'
+            };
+        }
+
         this.videoSource = {
             attributes: {
                 token: 'video_src_token'
@@ -129,6 +164,17 @@ class OnvifServer {
             );
         }
         
+        if (this.audioConfig) {
+            this.profiles = this.profiles.map((profile) => ({
+                Name: profile.Name,
+                attributes: profile.attributes,
+                VideoSourceConfiguration: profile.VideoSourceConfiguration,
+                AudioSourceConfiguration: this.audioSourceConfiguration,
+                VideoEncoderConfiguration: profile.VideoEncoderConfiguration,
+                AudioEncoderConfiguration: this.audioEncoderConfiguration
+            }));
+        }
+
         this.onvif = {
             DeviceService: {
                 Device: {
@@ -314,6 +360,46 @@ class OnvifServer {
                             VideoSources: [
                                 this.videoSource
                             ]
+                        };
+                    },
+
+                    GetAudioSources: (args) => {
+                        return {
+                            AudioSources: this.audioConfig ? [ this.audioSource ] : []
+                        };
+                    },
+
+                    GetAudioSourceConfigurations: (args) => {
+                        return {
+                            Configurations: this.audioConfig ? [ this.audioSourceConfiguration ] : []
+                        };
+                    },
+
+                    GetAudioEncoderConfigurations: (args) => {
+                        return {
+                            Configurations: this.audioConfig ? [ this.audioEncoderConfiguration ] : []
+                        };
+                    },
+
+                    GetAudioEncoderConfiguration: (args) => {
+                        if (this.audioConfig)
+                            return { Configuration: this.audioEncoderConfiguration };
+                        return {};
+                    },
+
+                    GetAudioEncoderConfigurationOptions: (args) => {
+                        if (!this.audioConfig)
+                            return { Options: {} };
+                        return {
+                            Options: {
+                                Options: [
+                                    {
+                                        Encoding: this.audioConfig.encoding,
+                                        BitrateList: { Items: [ this.audioConfig.bitrate ] },
+                                        SampleRateList: { Items: [ this.audioConfig.samplerate ] }
+                                    }
+                                ]
+                            }
                         };
                     },
         
