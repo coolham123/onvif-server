@@ -127,6 +127,7 @@ async function createConfig(hostname, username, password) {
 exports.createConfig = async function(hostname, username, password) {
 
     let config;
+    let originalGetUTCHours = null;
     try {
         config = await createConfig(hostname, username, password);
     } catch (err) {
@@ -135,6 +136,7 @@ exports.createConfig = async function(hostname, username, password) {
             console.log('Retrying...')
 
             var utcHours = (new Date()).getUTCHours();
+            originalGetUTCHours = Date.prototype.getUTCHours;
             Date.prototype.getUTCHours = function() {
                 return utcHours + 1;
             }
@@ -145,6 +147,9 @@ exports.createConfig = async function(hostname, username, password) {
                 console.log(err);
             }
         }
+    } finally {
+        if (originalGetUTCHours !== null)
+            Date.prototype.getUTCHours = originalGetUTCHours;
     }
 
     return config;

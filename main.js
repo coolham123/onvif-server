@@ -86,6 +86,8 @@ if (args) {
         }
 
         let proxies = {};
+        let servers = [];
+        let proxyServers = [];
 
         for (let onvifConfig of config.onvif) {
             let server = onvifServer.createServer(onvifConfig, logger);
@@ -95,6 +97,7 @@ if (args) {
                 server.startDiscovery();
                 if (args.debug)
                     server.enableDebugOutput();
+                servers.push(server);
                 logger.info('  Started!');
                 logger.info('');
 
@@ -122,11 +125,37 @@ if (args) {
         for (let destinationAddress in proxies) {
             for (let sourcePort in proxies[destinationAddress]) {
                 logger.info(`Starting tcp proxy from port ${sourcePort} to ${destinationAddress}:${proxies[destinationAddress][sourcePort]} ...`);
-                tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]);
+                proxyServers.push(tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]));
                 logger.info('  Started!');
                 logger.info('');
             }
         }
+
+        // Graceful shutdown on SIGTERM/SIGINT so Docker stops/restarts release
+        // all sockets instead of waiting for the kill timeout.
+        let shuttingDown = false;
+        const gracefulShutdown = async (signal) => {
+            if (shuttingDown)
+                return;
+            shuttingDown = true;
+            logger.info(`Received ${signal}, shutting down gracefully ...`);
+
+            for (const proxy of proxyServers) {
+                try {
+                    proxy.end();
+                } catch (err) {
+                    logger.error('Error closing TCP proxy: ' + err.message);
+                }
+            }
+
+            await Promise.all(servers.map((server) => server.shutdown()));
+
+            logger.info('All servers shut down');
+            process.exit(0);
+        };
+
+        process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+        process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
     } else {
         logger.error('Please specifiy a config filename!');

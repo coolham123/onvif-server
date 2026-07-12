@@ -30,6 +30,11 @@ class OnvifServer {
     constructor(config, logger) {
         this.config = config;
         this.logger = logger;
+        this.snapshotCache = null;
+        this.debugListenersAdded = false;
+
+        // Reusable parser instead of a new one per discovery message.
+        this.xmlParser = new xml2js.Parser({ tagNameProcessors: [xml2js['processors'].stripPrefix] });
 
         if (!this.config.hostname)
             this.config.hostname = getIpAddressFromMac(this.config.mac);
@@ -442,9 +447,18 @@ class OnvifServer {
     listen(request, response) {
         let action = url.parse(request.url, true).pathname;
         if (action == '/snapshot.png') {
-            let image = fs.readFileSync('./resources/snapshot.png');
+            if (!this.snapshotCache) {
+                try {
+                    this.snapshotCache = fs.readFileSync('./resources/snapshot.png');
+                } catch (err) {
+                    this.logger.error('Failed to read snapshot.png: ' + err.message);
+                    response.writeHead(500, {'Content-Type': 'text/plain'});
+                    response.end('Internal Server Error\n');
+                    return;
+                }
+            }
             response.writeHead(200, {'Content-Type': 'image/png' });
-            response.end(image, 'binary');
+            response.end(this.snapshotCache, 'binary');
         } else if (this.config.ptz && action == '/onvif/ptz_service' && request.method == 'POST') {
             this.relayPtz(request, response);
         } else {
@@ -577,6 +591,10 @@ class OnvifServer {
     startServer() {
         this.server = http.createServer((request, response) => this.listen(request, response));
 
+        this.server.on('error', (err) => {
+            this.logger.error(`HTTP server error for ${this.config.name}: ${err.message}`);
+        });
+
         this.server.listen(this.config.ports.server, this.config.hostname);
 
         this.deviceService = soap.listen(this.server, {
@@ -595,6 +613,10 @@ class OnvifServer {
     }
 
     enableDebugOutput() {
+        if (this.debugListenersAdded)
+            return;
+        this.debugListenersAdded = true;
+
         this.deviceService.on('request', (request, methodName) => {
             this.logger.debug('DeviceService: ' + methodName);
         });
@@ -607,13 +629,28 @@ class OnvifServer {
     startDiscovery() {
         this.discoveryMessageNo = 0;
         this.discoverySocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-        
+
+        this.discoverySocket.on('error', (err) => {
+            this.logger.error(`Discovery socket error for ${this.config.name}: ${err.message}`);
+        });
+
         this.discoverySocket.on('message', (message, remote) => {
             this.logger.debug(`Discovery Server: ${this.config.name} - Discovery request from ${remote.address}:${remote.port}`);
 
-            xml2js.parseString(message.toString(), { tagNameProcessors: [xml2js['processors'].stripPrefix] }, (err, result) => {
-                let probeUuid = result['Envelope']['Header'][0]['MessageID'][0];
+            this.xmlParser.parseString(message.toString(), (err, result) => {
+                if (err || !result) {
+                    this.logger.debug('Discovery Server: ignoring unparsable message: ' + (err ? err.message : 'empty result'));
+                    return;
+                }
+
+                let probeUuid;
                 let probeType = '';
+                try {
+                    probeUuid = result['Envelope']['Header'][0]['MessageID'][0];
+                } catch (err) {
+                    this.logger.debug('Discovery Server: ignoring message without MessageID');
+                    return;
+                }
                 try {
                     probeType = result['Envelope']['Body'][0]['Probe'][0]['Types'][0];
                 } catch (err) {
@@ -660,7 +697,12 @@ class OnvifServer {
 
                     this.discoveryMessageNo++;
                     let responseBuffer = Buffer.from(response);
-                    return dgram.createSocket('udp4').send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address);
+                    // Reuse the discovery socket instead of creating a new socket
+                    // per probe response, which leaked file descriptors.
+                    this.discoverySocket.send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address, (err) => {
+                        if (err)
+                            this.logger.error('Discovery response send error: ' + err.message);
+                    });
                 }
             });
         });
@@ -672,6 +714,46 @@ class OnvifServer {
 
     getHostname() {
         return this.config.hostname;
+    }
+
+    shutdown() {
+        return new Promise((resolve) => {
+            let closeCount = 0;
+            const totalToClose = 2; // http server + discovery socket
+
+            const checkComplete = () => {
+                closeCount++;
+                if (closeCount >= totalToClose) {
+                    this.logger.info(`Shutdown complete for ${this.config.name}`);
+                    resolve();
+                }
+            };
+
+            if (this.server) {
+                this.server.close((err) => {
+                    if (err)
+                        this.logger.error('Error closing HTTP server: ' + err.message);
+                    checkComplete();
+                });
+                // close() waits for open connections; don't hold shutdown hostage
+                // to a client that keeps its connection alive.
+                if (this.server.closeAllConnections)
+                    this.server.closeAllConnections();
+            } else {
+                checkComplete();
+            }
+
+            if (this.discoverySocket) {
+                try {
+                    this.discoverySocket.close(() => checkComplete());
+                } catch (err) {
+                    this.logger.error('Error closing discovery socket: ' + err.message);
+                    checkComplete();
+                }
+            } else {
+                checkComplete();
+            }
+        });
     }
 };
 
