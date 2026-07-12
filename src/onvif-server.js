@@ -34,6 +34,9 @@ class OnvifServer {
         if (!this.config.hostname)
             this.config.hostname = getIpAddressFromMac(this.config.mac);
 
+        this.realPtzProfileToken = null;
+        this.ptzTarget = null;
+
         this.videoSource = {
             attributes: {
                 token: 'video_src_token'
@@ -224,6 +227,11 @@ class OnvifServer {
                                 Extension: {}
                             };
                         }
+                        if (this.config.ptz && (args.Category === undefined || args.Category == 'All' || args.Category == 'PTZ')) {
+                            response.Capabilities['PTZ'] = {
+                                XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/ptz_service`
+                            };
+                        }
                         if (args.Category === undefined || args.Category == 'All' || args.Category == 'Media') {
                             response.Capabilities['Media'] = {
                                 XAddr: `http://${this.config.hostname}:${this.config.ports.server}/onvif/media_service`,
@@ -245,8 +253,7 @@ class OnvifServer {
                     },
         
                     GetServices: (args) => {
-                        return {
-                            Service : [
+                        let services = [
                                 {
                                     Namespace : 'http://www.onvif.org/ver10/device/wsdl',
                                     XAddr : `http://${this.config.hostname}:${this.config.ports.server}/onvif/device_service`,
@@ -263,7 +270,21 @@ class OnvifServer {
                                         Minor : 5,
                                     }
                                 }
-                            ]
+                            ];
+
+                        if (this.config.ptz) {
+                            services.push({
+                                Namespace : 'http://www.onvif.org/ver20/ptz/wsdl',
+                                XAddr : `http://${this.config.hostname}:${this.config.ports.server}/onvif/ptz_service`,
+                                Version : {
+                                    Major : 2,
+                                    Minor : 5,
+                                }
+                            });
+                        }
+
+                        return {
+                            Service : services
                         };
                     },
                 
@@ -338,6 +359,8 @@ class OnvifServer {
             let image = fs.readFileSync('./resources/snapshot.png');
             response.writeHead(200, {'Content-Type': 'image/png' });
             response.end(image, 'binary');
+        } else if (this.config.ptz && action == '/onvif/ptz_service' && request.method == 'POST') {
+            this.relayPtz(request, response);
         } else {
             response.writeHead(404, {'Content-Type': 'text/plain'});
             response.write('404 Not Found\n');
@@ -345,8 +368,128 @@ class OnvifServer {
         }
     }
 
+    relayPtz(request, response) {
+        let chunks = [];
+        request.on('data', (chunk) => chunks.push(chunk));
+        request.on('end', () => {
+            if (!this.ptzTarget) {
+                response.writeHead(502, {'Content-Type': 'text/plain'});
+                response.end('PTZ passthrough not initialized\n');
+                return;
+            }
+
+            let body = Buffer.concat(chunks).toString('utf8');
+
+            // Rewrite our virtual profile tokens to the camera's real PTZ profile token.
+            // All other tokens (configuration, node, preset) originate from the camera
+            // via relayed responses and are passed through untouched.
+            if (this.realPtzProfileToken) {
+                body = body.replace(
+                    /(<[^>]*ProfileToken[^>]*>)\s*(?:main_stream|sub_stream)\s*(<\/[^>]*ProfileToken[^>]*>)/g,
+                    `$1${this.realPtzProfileToken}$2`
+                );
+            }
+
+            const relayRequest = http.request({
+                hostname: this.ptzTarget.hostname,
+                port: this.ptzTarget.port,
+                path: this.ptzTarget.path,
+                method: 'POST',
+                headers: {
+                    'Content-Type': request.headers['content-type'] || 'application/soap+xml; charset=utf-8',
+                    'Content-Length': Buffer.byteLength(body)
+                }
+            }, (relayResponse) => {
+                this.logger.debug(`PtzService: relayed request -> ${relayResponse.statusCode}`);
+                response.writeHead(relayResponse.statusCode, {
+                    'Content-Type': relayResponse.headers['content-type'] || 'application/soap+xml; charset=utf-8'
+                });
+                relayResponse.pipe(response);
+            });
+
+            relayRequest.setTimeout(10000, () => relayRequest.destroy(new Error('PTZ relay timeout')));
+            relayRequest.on('error', (err) => {
+                this.logger.error(`PtzService: relay error: ${err.message}`);
+                if (!response.headersSent)
+                    response.writeHead(502, {'Content-Type': 'text/plain'});
+                response.end();
+            });
+
+            relayRequest.end(body);
+        });
+    }
+
+    async startPtz() {
+        const ptzConfig = this.config.ptz;
+        const onvifPort = ptzConfig.port || 8000;
+        const endpoint = `http://${this.config.target.hostname}:${onvifPort}/onvif/device_service`;
+
+        const options = { forceSoap12Headers: true };
+        const securityOptions = { hasNonce: true, passwordType: 'PasswordDigest' };
+
+        // Discover the camera's PTZ-capable media profile.
+        let mediaClient = await soap.createClientAsync('./wsdl/media_service.wsdl', options);
+        mediaClient.setEndpoint(endpoint);
+        mediaClient.setSecurity(new soap.WSSecurity(ptzConfig.username, ptzConfig.password, securityOptions));
+
+        let profiles = (await mediaClient.GetProfilesAsync({}))[0].Profiles;
+        let realProfile = null;
+        for (let profile of profiles) {
+            if (!profile.PTZConfiguration)
+                continue;
+            if (ptzConfig.profileToken) {
+                if (profile.attributes.token === ptzConfig.profileToken) {
+                    realProfile = profile;
+                    break;
+                }
+            } else {
+                realProfile = profile;
+                break;
+            }
+        }
+
+        if (!realProfile)
+            throw new Error('No camera media profile with a PTZConfiguration was found' +
+                (ptzConfig.profileToken ? ` (matching token '${ptzConfig.profileToken}')` : ''));
+
+        this.realPtzProfileToken = realProfile.attributes.token;
+
+        // Embed the camera's real PTZConfiguration into our virtual profiles so
+        // clients detect PTZ capability; its tokens are valid on the relayed service.
+        for (let profile of this.profiles)
+            profile.PTZConfiguration = realProfile.PTZConfiguration;
+
+        // Discover the camera's real PTZ service endpoint.
+        let deviceClient = await soap.createClientAsync('./wsdl/device_service.wsdl', options);
+        deviceClient.setEndpoint(endpoint);
+        deviceClient.setSecurity(new soap.WSSecurity(ptzConfig.username, ptzConfig.password, securityOptions));
+
+        let ptzPath = '/onvif/ptz_service';
+        let ptzPort = onvifPort;
+        try {
+            let capabilities = (await deviceClient.GetCapabilitiesAsync({ Category: 'PTZ' }))[0];
+            if (capabilities && capabilities.Capabilities && capabilities.Capabilities.PTZ && capabilities.Capabilities.PTZ.XAddr) {
+                let xaddr = url.parse(capabilities.Capabilities.PTZ.XAddr);
+                ptzPath = xaddr.pathname || ptzPath;
+                ptzPort = parseInt(xaddr.port) || (xaddr.protocol === 'https:' ? 443 : 80);
+            }
+        } catch (err) {
+            this.logger.warn(`PtzService: GetCapabilities(PTZ) failed (${err.message}), assuming ${ptzPath} on port ${ptzPort}`);
+        }
+
+        // Always contact the camera at its configured hostname, regardless of
+        // what host the camera put in its XAddr.
+        this.ptzTarget = {
+            hostname: this.config.target.hostname,
+            port: ptzPort,
+            path: ptzPath
+        };
+
+        return this.realPtzProfileToken;
+    }
+
     startServer() {
-        this.server = http.createServer(this.listen);
+        this.server = http.createServer((request, response) => this.listen(request, response));
 
         this.server.listen(this.config.ports.server, this.config.hostname);
 
