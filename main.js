@@ -22,6 +22,10 @@ let args = parser.parse_args();
 
 if (args) {
     const logger = simpleLogger.createSimpleLogger();
+    // ONVIF_DEBUG env var enables debug output in containers, where the
+    // shell-form ENTRYPOINT makes passing -d awkward.
+    if (process.env.ONVIF_DEBUG)
+        args.debug = true;
     if (args.debug)
         logger.setLevel('trace');
 

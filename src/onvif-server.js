@@ -462,6 +462,7 @@ class OnvifServer {
         } else if (this.config.ptz && action == '/onvif/ptz_service' && request.method == 'POST') {
             this.relayPtz(request, response);
         } else {
+            this.logger.debug(`HTTP: 404 for ${request.method} ${action} from ${request.socket.remoteAddress}`);
             response.writeHead(404, {'Content-Type': 'text/plain'});
             response.write('404 Not Found\n');
             response.end();
